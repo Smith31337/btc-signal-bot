@@ -7,7 +7,7 @@ import os
 app = Flask(__name__)
 
 # === НАСТРОЙКИ ===
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_TOKEN = os.environ.get('8933641686:AAEhw8S8ZN5cskGukui3RxL1VE7I3eszHsk')
 CHAT_ID = int(os.environ.get('CHAT_ID', '172606168'))
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'QQQwww111!!!')
 
@@ -18,10 +18,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-# === РАСЧЁТ RSI (Алгоритм Уайлдера, как на TradingView) ===
-def calculate_rsi(klines, period=14):
+# === РАСЧЁТ RSI (Алгоритм Уайлдера) ===
+def calculate_rsi(closes, period=14):
     try:
-        closes = [float(k[4]) for k in klines]
         if len(closes) < period + 1:
             return 50.0
         
@@ -46,21 +45,42 @@ def calculate_rsi(klines, period=14):
         return 50.0
 
 
-# === ПОЛУЧЕНИЕ ДАННЫХ С BINANCE ===
+# === ПОЛУЧЕНИЕ ДАННЫХ С BYBIT ===
 def get_btc_data():
-    """Получает текущую цену и RSI(14) на 4H с Binance"""
+    """Получает текущую цену и RSI(14) на 4H с Bybit"""
     try:
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=100"
-        response = requests.get(url, timeout=10)
+        # Bybit API v5 — работает стабильно в РФ и на Railway
+        url = "https://api.bybit.com/v5/market/kline"
+        params = {
+            'category': 'spot',
+            'symbol': 'BTCUSDT',
+            'interval': '240',  # 4 часа
+            'limit': '100'
+        }
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
-        klines = response.json()
+        data = response.json()
         
-        current_price = float(klines[-1][4])
-        current_rsi = calculate_rsi(klines, period=14)
+        if data['retCode'] != 0:
+            logger.error(f'Bybit API error: {data}')
+            return None, None
         
+        # Извлекаем свечи
+        klines = data['result']['list']
+        # Bybit возвращает в обратном порядке (новые сначала), разворачиваем
+        klines.reverse()
+        
+        # Извлекаем цены закрытия
+        closes = [float(k[4]) for k in klines]
+        current_price = closes[-1]
+        
+        # Рассчитываем RSI
+        current_rsi = calculate_rsi(closes, period=14)
+        
+        logger.info(f'Bybit data: price={current_price}, rsi={current_rsi}')
         return current_price, current_rsi
     except Exception as e:
-        logger.error(f'Ошибка получения данных Binance: {e}')
+        logger.error(f'Ошибка получения данных Bybit: {e}')
         return None, None
 
 
@@ -172,7 +192,7 @@ def live_check():
         price, rsi = get_btc_data()
         
         if price is None or rsi is None:
-            return jsonify({'status': 'error', 'message': 'Не удалось получить данные с Binance'}), 500
+            return jsonify({'status': 'error', 'message': 'Не удалось получить данные с биржи'}), 500
         
         message, score = analyze_signal(rsi, price, "Ручная проверка (Live)")
         success = send_telegram_message(message)
