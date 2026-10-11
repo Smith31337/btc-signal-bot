@@ -248,15 +248,16 @@ def live_check():
         if price is None or rsi is None:
             return jsonify({'status': 'error', 'message': 'Все биржи недоступны'}), 500
         
-        message, score = analyze_signal(rsi, price, f"Ручная проверка ({source})")
-        success = send_telegram_message(message)
+        # Минимальное сообщение для теста
+        test_message = f"BTC Live Check\nЦена: ${price:,.0f}\nRSI: {rsi:.2f}\nИсточник: {source}"
+        
+        success = send_telegram_message(test_message)
         
         return jsonify({
             'status': 'success' if success else 'failed',
             'rsi': round(rsi, 2),
             'price': price,
-            'source': source,
-            'score': score
+            'source': source
         })
     except Exception as e:
         logger.error(f'Ошибка live-check: {e}')
