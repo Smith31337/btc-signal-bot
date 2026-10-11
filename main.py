@@ -23,17 +23,18 @@ def send_telegram_message(message):
     url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
     payload = {
         'chat_id': CHAT_ID,
-        'text': message,
-        'parse_mode': 'HTML'
+        'text': message
+        # Убрали parse_mode: 'HTML'
     }
     try:
         response = requests.post(url, json=payload, timeout=10)
+        logger.info(f'Telegram response: {response.status_code} - {response.text}')
         if response.status_code != 200:
             logger.error(f'Telegram error: {response.status_code} - {response.text}')
         response.raise_for_status()
         return True
     except Exception as e:
-        logger.error(f'Ошибка: {e}')
+        logger.error(f'Ошибка отправки: {e}')
         return False
 
 
