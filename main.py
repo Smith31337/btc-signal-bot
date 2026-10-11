@@ -7,7 +7,7 @@ import os
 app = Flask(__name__)
 
 # === НАСТРОЙКИ ===
-TELEGRAM_TOKEN = os.environ.get('8933641686:AAEhw8S8ZN5cskGukui3RxL1VE7I3eszHsk')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8933641686:AAEhw8S8ZN5cskGukui3RxL1VE7I3eszHsk')
 CHAT_ID = int(os.environ.get('CHAT_ID', '172606168'))
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'QQQwww111!!!')
 
