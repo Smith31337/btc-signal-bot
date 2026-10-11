@@ -7,7 +7,7 @@ import os
 app = Flask(__name__)
 
 # === НАСТРОЙКИ ===
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8933641686:AAEhw8S8ZN5cskGukui3RxL1VE7I3eszHsk')
+TELEGRAM_TOKEN = os.environ.get('8933641686:AAEhw8S8ZN5cskGukui3RxL1VE7I3eszHsk')
 CHAT_ID = int(os.environ.get('CHAT_ID', '172606168'))
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'QQQwww111!!!')
 
@@ -17,6 +17,31 @@ RESISTANCE_LEVEL = 86620
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# === РАСЧЁТ RSI (Алгоритм Уайлдера) ===
+def calculate_rsi(klines, period=14):
+    try:
+        closes = [float(k[4]) for k in klines]
+        if len(closes) < period + 1:
+            return 50.0
+        
+        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+        gains = [d if d > 0 else 0.0 for d in deltas]
+        losses = [-d if d < 0 else 0.0 for d in deltas]
+        
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+        
+        for i in range(period, len(gains)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+            
+        if avg_loss == 0:
+            return 100.0
+            
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+    except Exception:
+        return 50.0
 
 # === ОТПРАВКА В TELEGRAM ===
 def send_telegram_message(message):
@@ -24,32 +49,22 @@ def send_telegram_message(message):
     payload = {
         'chat_id': CHAT_ID,
         'text': message
-        # Убрали parse_mode: 'HTML'
     }
     try:
         response = requests.post(url, json=payload, timeout=10)
-        logger.info(f'Telegram response: {response.status_code} - {response.text}')
-        if response.status_code != 200:
-            logger.error(f'Telegram error: {response.status_code} - {response.text}')
+        logger.info(f'Telegram response: {response.status_code}')
         response.raise_for_status()
         return True
     except Exception as e:
         logger.error(f'Ошибка отправки: {e}')
         return False
 
-
 # === АНАЛИЗ СИГНАЛА ===
-def analyze_signal(data):
+def analyze_signal(rsi, price, signal_type, volume_ratio=1.0):
     try:
-        rsi = float(data.get('rsi', 100))
-        price = float(data.get('price', 0))
-        signal_type = data.get('signal_type', 'Неизвестно')
-        volume_ratio = float(data.get('volume_ratio', 1.0))
-
         signals = []
         score = 0
 
-        # RSI
         if rsi < 25:
             signals.append("RSI в глубокой перепроданности (< 25)")
             score += 1
@@ -62,7 +77,6 @@ def analyze_signal(data):
         else:
             signals.append("RSI не в зоне перепроданности")
 
-        # Цена
         distance = ((price - SUPPORT_LEVEL) / SUPPORT_LEVEL) * 100
         if distance < 1:
             signals.append(f"Цена на поддержке ({distance:.2f}%)")
@@ -76,7 +90,6 @@ def analyze_signal(data):
         else:
             signals.append(f"Цена далеко от поддержки ({distance:.2f}%)")
 
-        # Объем
         if volume_ratio > 1.5:
             signals.append(f"Объем выше среднего в {volume_ratio:.1f}x")
             score += 1
@@ -86,7 +99,6 @@ def analyze_signal(data):
         else:
             signals.append(f"Объем средний ({volume_ratio:.1f}x)")
 
-        # Рекомендация
         confidence = (score / 3) * 100
         if score >= 2.5:
             rec = "СИЛЬНЫЙ СИГНАЛ К ПОКУПКЕ!"
@@ -108,7 +120,7 @@ BTC SIGNAL: {signal_type}
 {chr(10).join(signals)}
 
 Цена: ${price:,.0f}
-RSI: {rsi:.2f}
+RSI (4H): {rsi:.2f}
 Объем: {volume_ratio:.1f}x
 
 Уровни:
@@ -128,10 +140,43 @@ RSI: {rsi:.2f}
 """
         return message, score
     except Exception as e:
-        return f"Ошибка: {e}", 0
+        return f"Ошибка анализа: {e}", 0
 
+# === LIVE CHECK (Для бесплатного использования) ===
+@app.route('/live-check', methods=['GET'])
+def live_check():
+    try:
+        # 1. Получаем последние 20 свечей 4H с Binance (бесплатно, без ключей)
+        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=20"
+        response = requests.get(url, timeout=10)
+        klines = response.json()
+        
+        # 2. Извлекаем цену закрытия последней свечи
+        current_price = float(klines[-1][4])
+        
+        # 3. Считаем RSI
+        current_rsi = calculate_rsi(klines, period=14)
+        
+        # 4. Анализируем и отправляем
+        message, score = analyze_signal(
+            rsi=current_rsi, 
+            price=current_price, 
+            signal_type="Ручная проверка (Live)",
+            volume_ratio=1.0 # Упрощаем для ручной проверки
+        )
+        
+        success = send_telegram_message(message)
+        
+        if success:
+            return jsonify({'status': 'success', 'message': 'Данные отправлены в Telegram', 'rsi': current_rsi, 'price': current_price})
+        else:
+            return jsonify({'status': 'failed', 'message': 'Ошибка отправки в Telegram'})
+            
+    except Exception as e:
+        logger.error(f'Ошибка live-check: {e}')
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# === WEBHOOK ===
+# === WEBHOOK (Оставляем на будущее, если перейдёте на платный TV) ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -139,37 +184,28 @@ def webhook():
         if data.get('secret') != WEBHOOK_SECRET:
             return jsonify({'status': 'error'}), 401
 
-        message, score = analyze_signal(data)
+        message, score = analyze_signal(
+            rsi=float(data.get('rsi', 100)),
+            price=float(data.get('price', 0)),
+            signal_type=data.get('signal_type', 'Webhook'),
+            volume_ratio=float(data.get('volume_ratio', 1.0))
+        )
         success = send_telegram_message(message)
-
         return jsonify({'status': 'success' if success else 'failed', 'score': score})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-
 # === ТЕСТ ===
 @app.route('/test', methods=['GET'])
 def test():
-    test_data = {
-        'secret': WEBHOOK_SECRET,
-        'signal_type': 'Тест',
-        'rsi': 28.5,
-        'price': 81500,
-        'volume_ratio': 1.8
-    }
-    message, score = analyze_signal(test_data)
+    message, score = analyze_signal(rsi=28.5, price=81500, signal_type='Тест', volume_ratio=1.8)
     success = send_telegram_message(message)
     return jsonify({'status': 'success' if success else 'failed', 'score': score})
-
 
 # === СТАТУС ===
 @app.route('/status', methods=['GET'])
 def status():
-    return jsonify({
-        'status': 'online',
-        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    })
-
+    return jsonify({'status': 'online', 'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
