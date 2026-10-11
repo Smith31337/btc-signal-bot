@@ -17,6 +17,8 @@ RESISTANCE_LEVEL = 86620
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+NL = chr(10)  # Перенос строки (безопасный)
+
 
 # === РАСЧЁТ RSI (Алгоритм Уайлдера) ===
 def calculate_rsi(closes, period=14):
@@ -49,15 +51,11 @@ def calculate_rsi(closes, period=14):
 def get_btc_data():
     """Пытается получить данные с нескольких бирж по очереди"""
     
-    # Источник 1: MEXC API (работает в РФ)
+    # Источник 1: MEXC API
     try:
         logger.info('Пробуем MEXC API...')
         url = "https://api.mexc.com/api/v3/klines"
-        params = {
-            'symbol': 'BTCUSDT',
-            'interval': '4h',
-            'limit': '100'
-        }
+        params = {'symbol': 'BTCUSDT', 'interval': '4h', 'limit': '100'}
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         klines = response.json()
@@ -75,18 +73,13 @@ def get_btc_data():
     try:
         logger.info('Пробуем Gate.io API...')
         url = "https://api.gateio.ws/api/v4/spot/candlesticks"
-        params = {
-            'currency_pair': 'BTC_USDT',
-            'interval': '4h',
-            'limit': '100'
-        }
+        params = {'currency_pair': 'BTC_USDT', 'interval': '4h', 'limit': '100'}
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         klines = response.json()
         
-        # Gate.io возвращает в обратном порядке
         klines.reverse()
-        closes = [float(k[2]) for k in klines]  # индекс 2 = close price
+        closes = [float(k[2]) for k in klines]
         current_price = closes[-1]
         current_rsi = calculate_rsi(closes, period=14)
         
@@ -95,59 +88,52 @@ def get_btc_data():
     except Exception as e:
         logger.error(f'Gate.io ошибка: {e}')
     
-    # Источник 3: CoinGecko (только цена, RSI через альтернативный расчёт)
+    # Источник 3: CoinGecko
     try:
         logger.info('Пробуем CoinGecko API...')
-        # Получаем текущую цену
         url = "https://api.coingecko.com/api/v3/simple/price"
-        params = {
-            'ids': 'bitcoin',
-            'vs_currencies': 'usd'
-        }
+        params = {'ids': 'bitcoin', 'vs_currencies': 'usd'}
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         current_price = float(data['bitcoin']['usd'])
         
-        # Получаем исторические данные за последние 14 дней для RSI
         url2 = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-        params2 = {
-            'vs_currency': 'usd',
-            'days': '14',
-            'interval': 'daily'
-        }
+        params2 = {'vs_currency': 'usd', 'days': '14', 'interval': 'daily'}
         response2 = requests.get(url2, params=params2, timeout=10)
         response2.raise_for_status()
         data2 = response2.json()
         
-        # Извлекаем цены
         prices = [p[1] for p in data2['prices']]
         
         if len(prices) >= 15:
             current_rsi = calculate_rsi(prices, period=14)
         else:
-            current_rsi = 50.0  # Нейтральное значение если данных мало
+            current_rsi = 50.0
         
         logger.info(f'CoinGecko успешно: price={current_price}, rsi={current_rsi}')
         return current_price, current_rsi, 'CoinGecko'
     except Exception as e:
         logger.error(f'CoinGecko ошибка: {e}')
     
-    # Все источники не сработали
     logger.error('Все биржи недоступны')
     return None, None, None
 
 
-# === ОТПРАВКА В TELEGRAM ===
+# === ОТПРАВКА В TELEGRAM (с HTML) ===
 def send_telegram_message(message):
     url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
     payload = {
         'chat_id': CHAT_ID,
-        'text': message
+        'text': message,
+        'parse_mode': 'HTML',
+        'disable_web_page_preview': True
     }
     try:
         response = requests.post(url, json=payload, timeout=10)
         logger.info(f'Telegram response: {response.status_code}')
+        if response.status_code != 200:
+            logger.error(f'Telegram error: {response.status_code} - {response.text}')
         response.raise_for_status()
         return True
     except Exception as e:
@@ -155,17 +141,18 @@ def send_telegram_message(message):
         return False
 
 
-# === АНАЛИЗ СИГНАЛА ===
+# === АНАЛИЗ СИГНАЛА (с красивым HTML) ===
 def analyze_signal(rsi, price, signal_type, volume_ratio=1.0):
     try:
         signals = []
         score = 0
 
+        # RSI анализ
         if rsi < 25:
-            signals.append("RSI в глубокой перепроданности (< 25)")
+            signals.append("RSI в глубокой перепроданности (&lt; 25)")
             score += 1
         elif rsi < 30:
-            signals.append("RSI в зоне перепроданности (< 30)")
+            signals.append("RSI в зоне перепроданности (&lt; 30)")
             score += 1
         elif rsi < 40:
             signals.append("RSI приближается к перепроданности")
@@ -173,6 +160,7 @@ def analyze_signal(rsi, price, signal_type, volume_ratio=1.0):
         else:
             signals.append("RSI не в зоне перепроданности")
 
+        # Цена относительно поддержки
         distance = ((price - SUPPORT_LEVEL) / SUPPORT_LEVEL) * 100
         if distance < 1:
             signals.append(f"Цена на поддержке ({distance:.2f}%)")
@@ -186,6 +174,7 @@ def analyze_signal(rsi, price, signal_type, volume_ratio=1.0):
         else:
             signals.append(f"Цена далеко от поддержки ({distance:.2f}%)")
 
+        # Объем
         if volume_ratio > 1.5:
             signals.append(f"Объем выше среднего в {volume_ratio:.1f}x")
             score += 1
@@ -195,45 +184,48 @@ def analyze_signal(rsi, price, signal_type, volume_ratio=1.0):
         else:
             signals.append(f"Объем средний ({volume_ratio:.1f}x)")
 
+        # Рекомендация
         confidence = (score / 3) * 100
         if score >= 2.5:
             rec = "СИЛЬНЫЙ СИГНАЛ К ПОКУПКЕ!"
             action = "Вход 70-80% капитала"
+            emoji_rec = ""
         elif score >= 1.5:
             rec = "УМЕРЕННЫЙ СИГНАЛ"
             action = "Вход 30-50% капитала"
+            emoji_rec = ""
         else:
             rec = "СЛАБЫЙ СИГНАЛ"
             action = "Ждать"
+            emoji_rec = ""
 
+        # Параметры сделки
         stop_loss = price * 0.96
         risk_reward = (RESISTANCE_LEVEL - price) / (price - stop_loss) if price > stop_loss else 0
 
-        message = f"""
-BTC SIGNAL: {signal_type}
-
-Анализ:
-{chr(10).join(signals)}
-
-Цена: ${price:,.0f}
-RSI (4H): {rsi:.2f}
-Объем: {volume_ratio:.1f}x
-
-Уровни:
-- Поддержка: ${SUPPORT_LEVEL:,}
-- Сопротивление: ${RESISTANCE_LEVEL:,}
-
-Рекомендация: {rec}
-{action}
-
-Параметры:
-- Стоп-лосс: ${stop_loss:,.0f} (-4%)
-- Тейк-профит: ${RESISTANCE_LEVEL:,}
-- Риск/Прибыль: 1:{risk_reward:.2f}
-- Уверенность: {confidence:.0f}%
-
-Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}
-"""
+        # Формируем красивое HTML-сообщение
+        # ВАЖНО: используем &lt; вместо < в HTML, chr(10) для переносов
+        message = (
+            f"{emoji_rec} <b>BTC SIGNAL: {signal_type}</b>{NL}{NL}"
+            f"<b>Анализ:</b>{NL}"
+            f"{NL.join(signals)}{NL}{NL}"
+            f"<b>Текущая цена:</b> ${price:,.0f}{NL}"
+            f"<b>RSI (4H):</b> {rsi:.2f}{NL}"
+            f"<b>Объем:</b> {volume_ratio:.1f}x{NL}{NL}"
+            f"<b>Ключевые уровни:</b>{NL}"
+            f"  Поддержка: ${SUPPORT_LEVEL:,}{NL}"
+            f"  Сопротивление: ${RESISTANCE_LEVEL:,}{NL}{NL}"
+            f"<b>Рекомендация:</b>{NL}"
+            f"{rec}{NL}"
+            f"{action}{NL}{NL}"
+            f"<b>Параметры сделки:</b>{NL}"
+            f"  Стоп-лосс: ${stop_loss:,.0f} (-4%){NL}"
+            f"  Тейк-профит: ${RESISTANCE_LEVEL:,}{NL}"
+            f"  Риск/Прибыль: 1:{risk_reward:.2f}{NL}"
+            f"  Уверенность: {confidence:.0f}%{NL}{NL}"
+            f"<b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        
         return message, score
     except Exception as e:
         return f"Ошибка: {e}", 0
@@ -248,50 +240,19 @@ def live_check():
         if price is None or rsi is None:
             return jsonify({'status': 'error', 'message': 'Все биржи недоступны'}), 500
         
-        # Минимальное сообщение для теста
-        test_message = f"BTC Live Check\nЦена: ${price:,.0f}\nRSI: {rsi:.2f}\nИсточник: {source}"
-        
-        success = send_telegram_message(test_message)
+        message, score = analyze_signal(rsi, price, f"Ручная проверка ({source})")
+        success = send_telegram_message(message)
         
         return jsonify({
             'status': 'success' if success else 'failed',
             'rsi': round(rsi, 2),
             'price': price,
-            'source': source
+            'source': source,
+            'score': score
         })
     except Exception as e:
         logger.error(f'Ошибка live-check: {e}')
         return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-# === DEBUG API ===
-@app.route('/debug-api', methods=['GET'])
-def debug_api():
-    """Проверяет доступность всех бирж"""
-    results = {}
-    
-    # MEXC
-    try:
-        r = requests.get('https://api.mexc.com/api/v3/ping', timeout=5)
-        results['MEXC'] = 'OK' if r.status_code == 200 else f'Error {r.status_code}'
-    except Exception as e:
-        results['MEXC'] = f'Error: {str(e)[:50]}'
-    
-    # Gate.io
-    try:
-        r = requests.get('https://api.gateio.ws/api/v4/spot/currencies', timeout=5)
-        results['Gate.io'] = 'OK' if r.status_code == 200 else f'Error {r.status_code}'
-    except Exception as e:
-        results['Gate.io'] = f'Error: {str(e)[:50]}'
-    
-    # CoinGecko
-    try:
-        r = requests.get('https://api.coingecko.com/api/v3/ping', timeout=5)
-        results['CoinGecko'] = 'OK' if r.status_code == 200 else f'Error {r.status_code}'
-    except Exception as e:
-        results['CoinGecko'] = f'Error: {str(e)[:50]}'
-    
-    return jsonify(results)
 
 
 # === WEBHOOK ===
