@@ -45,43 +45,97 @@ def calculate_rsi(closes, period=14):
         return 50.0
 
 
-# === ПОЛУЧЕНИЕ ДАННЫХ С BYBIT ===
+# === ПОЛУЧЕНИЕ ДАННЫХ С НЕСКОЛЬКИХ БИРЖ ===
 def get_btc_data():
-    """Получает текущую цену и RSI(14) на 4H с Bybit"""
+    """Пытается получить данные с нескольких бирж по очереди"""
+    
+    # Источник 1: MEXC API (работает в РФ)
     try:
-        # Bybit API v5 — работает стабильно в РФ и на Railway
-        url = "https://api.bybit.com/v5/market/kline"
+        logger.info('Пробуем MEXC API...')
+        url = "https://api.mexc.com/api/v3/klines"
         params = {
-            'category': 'spot',
             'symbol': 'BTCUSDT',
-            'interval': '240',  # 4 часа
+            'interval': '4h',
             'limit': '100'
         }
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
-        data = response.json()
+        klines = response.json()
         
-        if data['retCode'] != 0:
-            logger.error(f'Bybit API error: {data}')
-            return None, None
-        
-        # Извлекаем свечи
-        klines = data['result']['list']
-        # Bybit возвращает в обратном порядке (новые сначала), разворачиваем
-        klines.reverse()
-        
-        # Извлекаем цены закрытия
         closes = [float(k[4]) for k in klines]
         current_price = closes[-1]
-        
-        # Рассчитываем RSI
         current_rsi = calculate_rsi(closes, period=14)
         
-        logger.info(f'Bybit data: price={current_price}, rsi={current_rsi}')
-        return current_price, current_rsi
+        logger.info(f'MEXC успешно: price={current_price}, rsi={current_rsi}')
+        return current_price, current_rsi, 'MEXC'
     except Exception as e:
-        logger.error(f'Ошибка получения данных Bybit: {e}')
-        return None, None
+        logger.error(f'MEXC ошибка: {e}')
+    
+    # Источник 2: Gate.io API
+    try:
+        logger.info('Пробуем Gate.io API...')
+        url = "https://api.gateio.ws/api/v4/spot/candlesticks"
+        params = {
+            'currency_pair': 'BTC_USDT',
+            'interval': '4h',
+            'limit': '100'
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        klines = response.json()
+        
+        # Gate.io возвращает в обратном порядке
+        klines.reverse()
+        closes = [float(k[2]) for k in klines]  # индекс 2 = close price
+        current_price = closes[-1]
+        current_rsi = calculate_rsi(closes, period=14)
+        
+        logger.info(f'Gate.io успешно: price={current_price}, rsi={current_rsi}')
+        return current_price, current_rsi, 'Gate.io'
+    except Exception as e:
+        logger.error(f'Gate.io ошибка: {e}')
+    
+    # Источник 3: CoinGecko (только цена, RSI через альтернативный расчёт)
+    try:
+        logger.info('Пробуем CoinGecko API...')
+        # Получаем текущую цену
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {
+            'ids': 'bitcoin',
+            'vs_currencies': 'usd'
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        current_price = float(data['bitcoin']['usd'])
+        
+        # Получаем исторические данные за последние 14 дней для RSI
+        url2 = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+        params2 = {
+            'vs_currency': 'usd',
+            'days': '14',
+            'interval': 'daily'
+        }
+        response2 = requests.get(url2, params=params2, timeout=10)
+        response2.raise_for_status()
+        data2 = response2.json()
+        
+        # Извлекаем цены
+        prices = [p[1] for p in data2['prices']]
+        
+        if len(prices) >= 15:
+            current_rsi = calculate_rsi(prices, period=14)
+        else:
+            current_rsi = 50.0  # Нейтральное значение если данных мало
+        
+        logger.info(f'CoinGecko успешно: price={current_price}, rsi={current_rsi}')
+        return current_price, current_rsi, 'CoinGecko'
+    except Exception as e:
+        logger.error(f'CoinGecko ошибка: {e}')
+    
+    # Все источники не сработали
+    logger.error('Все биржи недоступны')
+    return None, None, None
 
 
 # === ОТПРАВКА В TELEGRAM ===
@@ -185,22 +239,23 @@ RSI (4H): {rsi:.2f}
         return f"Ошибка: {e}", 0
 
 
-# === LIVE CHECK: Ручная проверка с реальными данными ===
+# === LIVE CHECK ===
 @app.route('/live-check', methods=['GET'])
 def live_check():
     try:
-        price, rsi = get_btc_data()
+        price, rsi, source = get_btc_data()
         
         if price is None or rsi is None:
-            return jsonify({'status': 'error', 'message': 'Не удалось получить данные с биржи'}), 500
+            return jsonify({'status': 'error', 'message': 'Все биржи недоступны'}), 500
         
-        message, score = analyze_signal(rsi, price, "Ручная проверка (Live)")
+        message, score = analyze_signal(rsi, price, f"Ручная проверка ({source})")
         success = send_telegram_message(message)
         
         return jsonify({
             'status': 'success' if success else 'failed',
             'rsi': round(rsi, 2),
             'price': price,
+            'source': source,
             'score': score
         })
     except Exception as e:
@@ -208,7 +263,37 @@ def live_check():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-# === WEBHOOK (на будущее) ===
+# === DEBUG API ===
+@app.route('/debug-api', methods=['GET'])
+def debug_api():
+    """Проверяет доступность всех бирж"""
+    results = {}
+    
+    # MEXC
+    try:
+        r = requests.get('https://api.mexc.com/api/v3/ping', timeout=5)
+        results['MEXC'] = 'OK' if r.status_code == 200 else f'Error {r.status_code}'
+    except Exception as e:
+        results['MEXC'] = f'Error: {str(e)[:50]}'
+    
+    # Gate.io
+    try:
+        r = requests.get('https://api.gateio.ws/api/v4/spot/currencies', timeout=5)
+        results['Gate.io'] = 'OK' if r.status_code == 200 else f'Error {r.status_code}'
+    except Exception as e:
+        results['Gate.io'] = f'Error: {str(e)[:50]}'
+    
+    # CoinGecko
+    try:
+        r = requests.get('https://api.coingecko.com/api/v3/ping', timeout=5)
+        results['CoinGecko'] = 'OK' if r.status_code == 200 else f'Error {r.status_code}'
+    except Exception as e:
+        results['CoinGecko'] = f'Error: {str(e)[:50]}'
+    
+    return jsonify(results)
+
+
+# === WEBHOOK ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
